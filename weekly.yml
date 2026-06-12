@@ -1,0 +1,55 @@
+name: Marcador Semanal - Reporte Automático
+
+# Esto define CUÁNDO se ejecuta el robot:
+#  - "schedule": automáticamente cada semana (lunes 8:00 AM hora Colombia = 13:00 UTC)
+#  - "workflow_dispatch": te permite también ejecutarlo manualmente desde GitHub
+on:
+  schedule:
+    - cron: "0 13 * * 1"
+  workflow_dispatch:
+
+# Permisos necesarios para que el robot pueda publicar en GitHub Pages
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. Descarga el código de tu repositorio
+      - name: Clonar repositorio
+        uses: actions/checkout@v4
+
+      # 2. Instala Python
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # 3. Instala las librerías necesarias
+      - name: Instalar dependencias
+        run: pip install requests beautifulsoup4
+
+      # 4. Ejecuta el script que genera el reporte (reports/index.html)
+      - name: Generar reporte
+        run: python weekly_sports_report.py
+
+      # 5. Prepara el contenido para GitHub Pages
+      - name: Preparar Pages
+        uses: actions/configure-pages@v5
+
+      - name: Subir contenido del reporte
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: reports
+
+      # 6. Publica el sitio
+      - name: Publicar en GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
