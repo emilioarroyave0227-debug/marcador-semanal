@@ -1,11 +1,18 @@
-"""
-Reporte Semanal de Deportes (HTML) - v3
+\"""
+Reporte Semanal de Deportes (HTML) - v4
 =========================================
 
-Ahora incluye varias ligas/competencias por deporte:
+CAMBIO IMPORTANTE respecto a versiones anteriores:
+ESPN carga sus páginas con JavaScript, así que descargar el HTML
+"crudo" no muestra las noticias (por eso antes salía vacío).
 
+Esta versión usa las APIs JSON públicas que ESPN usa internamente
+para cargar noticias y resultados (site.api.espn.com). Son mucho
+más confiables.
+
+Incluye:
     Fútbol:
-        - General (ESPN Colombia)
+        - Mundial 2026
         - Premier League
         - La Liga
         - Champions League
@@ -15,20 +22,20 @@ Ahora incluye varias ligas/competencias por deporte:
         - NFL
         - NCAA Football (Universitario)
 
+    NBA / Baloncesto:
+        - NBA
+
     Voleibol:
-        - General (ESPN Deportes)
-        - NCAA Voleibol (Universitario)
+        - General (ESPN Deportes) -- mediante scraping HTML
+          (ESPN no siempre tiene API pública de voleibol, así que
+          esta sección puede salir vacía si la página no trae
+          contenido estático. Si pasa eso, te lo aviso al final.)
 
-Genera una página HTML (reporte_deportes.html) con:
-    1. "Lo más relevante" arriba (lesiones y transferencias primero).
-    2. Listado completo por deporte > categoría, mostrando la liga
-       de origen de cada noticia.
-
-NOTA: Algunas URLs de ligas específicas pueden cambiar con el tiempo
-o no existir para todos los deportes. Si una liga falla, el script
-simplemente la omite y sigue con las demás (no rompe el reporte).
-Si ves "No se pudo obtener información" para una liga en particular,
-puedes editar/borrar esa URL en el diccionario SOURCES de abajo.
+Para cada liga con API se muestran:
+    1. Noticias de los últimos N días, separadas en:
+       Lesiones / Transferencias / Análisis y Opiniones / General
+    2. Jugadores destacados (líderes estadísticos) de los partidos
+       recientes.
 
 Requisitos (instalar una sola vez):
     pip install requests beautifulsoup4
@@ -38,7 +45,6 @@ Uso:
 """
 
 import os
-import re
 import datetime
 import requests
 from bs4 import BeautifulSoup
@@ -47,44 +53,62 @@ from bs4 import BeautifulSoup
 # CONFIGURACION
 # ---------------------------------------------------------------------------
 
-# Estructura: deporte -> { nombre_liga: url }
-SOURCES = {
-    "Fútbol": {
-        "General": "https://www.espn.com.co/futbol/",
-        "Premier League": "https://www.espn.com.co/futbol/liga/_/nombre/eng.1",
-        "La Liga": "https://www.espn.com.co/futbol/liga/_/nombre/esp.1",
-        "Champions League": "https://www.espn.com.co/futbol/liga/_/nombre/uefa.champions",
-        "Liga BetPlay (Colombia)": "https://www.espn.com.co/futbol/liga/_/nombre/col.1",
-    },
-    "NFL (Football Americano)": {
-        "NFL": "https://www.espn.com/nfl/",
-        "NCAA Football (Universitario)": "https://www.espn.com/college-football/",
-    },
-    "Voleibol": {
-        "General": "https://espndeportes.espn.com/voleibol/",
-        "NCAA Voleibol (Universitario)": "https://www.espn.com/college-volleyball/",
-    },
+API_BASE = "https://site.api.espn.com/apis/site/v2/sports"
+
+# Estructura: grupo_deporte -> lista de (nombre_liga, sport_path, league_path)
+SPORTS = {
+    "Fútbol ⚽": [
+        ("Mundial 2026", "soccer", "fifa.world"),
+        ("Premier League", "soccer", "eng.1"),
+        ("La Liga", "soccer", "esp.1"),
+        ("Champions League", "soccer", "uefa.champions"),
+        ("Liga BetPlay (Colombia)", "soccer", "col.1"),
+    ],
+    "NFL (Football Americano) 🏈": [
+        ("NFL", "football", "nfl"),
+        ("NCAA Football (Universitario)", "football", "college-football"),
+    ],
+    "NBA / Baloncesto 🏀": [
+        ("NBA", "basketball", "nba"),
+    ],
 }
 
-# Palabras clave para clasificar cada titular
+# Voleibol no siempre tiene API pública en ESPN -> se intenta scraping HTML
+VOLLEYBALL_SOURCES = {
+    "General (ESPN Deportes)": "https://espndeportes.espn.com/voleibol/",
+}
+
+# Palabras clave para clasificar noticias
 INJURY_KEYWORDS = [
-    "injury", "injured", "out for", "ruled out", "sidelined",
+    "injury", "injured", "out for", "ruled out", "sidelined", "hurt",
     "lesión", "lesion", "lesionado", "baja por lesión", "se pierde",
-    "dado de baja", "fuera de combate",
+    "dado de baja", "fuera de combate", "molestia",
 ]
 
 TRANSFER_KEYWORDS = [
     "transfer", "traded", "trade", "signs", "signing", "sign with",
-    "agrees to", "deal", "free agent", "extension",
+    "agrees to", "deal", "free agent", "extension", "waived", "released",
     "fichaje", "ficha por", "traspaso", "renovación", "renovacion",
-    "renueva", "se va al", "nuevo equipo", "acuerdo",
+    "renueva", "se va al", "nuevo equipo", "acuerdo", "contrato",
+]
+
+# Tipos de artículo de ESPN que consideramos "análisis / opinión"
+OPINION_TYPES = [
+    "Analysis", "Commentary", "Column", "PowerRankings", "Opinion",
+    "Notebook", "Insider",
 ]
 
 OUTPUT_DIR = "reports"
-HTML_FILENAME = "reporte_deportes.html"
+HTML_FILENAME = "index.html"  # nombre requerido por GitHub Pages para la página principal
 
-TOP_N_RELEVANT = 4          # noticias destacadas por deporte en el resumen
-MAX_PER_CATEGORY = 12       # noticias mostradas por categoría (todas las ligas combinadas)
+# Branding del sitio
+SITE_NAME = "Marcador Semanal"
+SITE_AUTHOR = "Emilio"
+
+DAYS_BACK = 8           # cuántos días atrás incluir en noticias
+MAX_NEWS_PER_CATEGORY = 6
+MAX_LEADERS = 6
+TOP_N_RELEVANT = 5
 
 HEADERS = {
     "User-Agent": (
@@ -95,199 +119,230 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9,es;q=0.8",
 }
 
+
 # ---------------------------------------------------------------------------
-# SCRAPING
+# UTILIDADES
 # ---------------------------------------------------------------------------
 
-def fetch_page(url: str):
+def fetch_json(url: str):
     try:
-        response = requests.get(url, headers=HEADERS, timeout=15)
-        response.raise_for_status()
-        return BeautifulSoup(response.text, "html.parser")
-    except requests.RequestException as exc:
-        print(f"    [AVISO] No se pudo descargar {url}: {exc}")
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as exc:
+        print(f"    [AVISO] No se pudo obtener {url}: {exc}")
         return None
 
 
-def get_base_url(url: str) -> str:
-    match = re.match(r"(https?://[^/]+)", url)
-    return match.group(1) if match else url
+def parse_date(date_str: str):
+    if not date_str:
+        return None
+    try:
+        # Formato típico de ESPN: 2026-06-09T20:30Z
+        return datetime.datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
-def extract_headlines(soup: BeautifulSoup, base_url: str) -> list[dict]:
+def classify_news(title: str, description: str, article_type: str) -> str:
+    text = f"{title} {description}".lower()
+
+    for kw in INJURY_KEYWORDS:
+        if kw in text:
+            return "Lesiones"
+
+    for kw in TRANSFER_KEYWORDS:
+        if kw in text:
+            return "Transferencias"
+
+    if article_type in OPINION_TYPES:
+        return "Análisis y Opiniones"
+
+    return "General"
+
+
+# ---------------------------------------------------------------------------
+# NOTICIAS (API)
+# ---------------------------------------------------------------------------
+
+def get_news(sport_path: str, league_path: str) -> dict:
+    """Devuelve noticias recientes categorizadas para una liga."""
+    url = f"{API_BASE}/{sport_path}/{league_path}/news"
+    data = fetch_json(url)
+
+    categories = {
+        "Lesiones": [],
+        "Transferencias": [],
+        "Análisis y Opiniones": [],
+        "General": [],
+    }
+
+    if not data:
+        return {"error": True, "categories": categories}
+
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=DAYS_BACK)
+
+    for article in data.get("articles", []):
+        title = article.get("headline", "").strip()
+        if not title:
+            continue
+
+        description = article.get("description", "") or ""
+        link = article.get("links", {}).get("web", {}).get("href", "")
+        article_type = article.get("type", "")
+        published = parse_date(article.get("published", ""))
+
+        if published and published < cutoff:
+            continue
+
+        category = classify_news(title, description, article_type)
+        categories[category].append({
+            "title": title,
+            "description": description,
+            "link": link,
+            "published": published,
+        })
+
+    return {"error": False, "categories": categories}
+
+
+# ---------------------------------------------------------------------------
+# JUGADORES DESTACADOS / ESTADISTICAS (API scoreboard)
+# ---------------------------------------------------------------------------
+
+def get_leaders(sport_path: str, league_path: str) -> list:
+    """Devuelve líderes estadísticos de los partidos recientes (scoreboard)."""
+    url = f"{API_BASE}/{sport_path}/{league_path}/scoreboard"
+    data = fetch_json(url)
+
+    if not data:
+        return []
+
+    results = []
+    for event in data.get("events", []):
+        competitions = event.get("competitions", [])
+        if not competitions:
+            continue
+        comp = competitions[0]
+
+        competitors = comp.get("competitors", [])
+        team_names = [c.get("team", {}).get("displayName", "?") for c in competitors]
+        matchup = " vs ".join(team_names) if team_names else event.get("name", "")
+
+        for leader_group in comp.get("leaders", []) or []:
+            cat_name = leader_group.get("displayName", "")
+            for leader in (leader_group.get("leaders") or [])[:1]:
+                athlete = leader.get("athlete", {}).get("displayName", "")
+                value = leader.get("displayValue", "")
+                if not athlete or not value:
+                    continue
+                results.append({
+                    "matchup": matchup,
+                    "category": cat_name,
+                    "athlete": athlete,
+                    "value": value,
+                })
+
+    return results[:MAX_LEADERS * 3]  # margen, luego se recorta por liga
+
+
+# ---------------------------------------------------------------------------
+# VOLEIBOL (scraping HTML, mejor esfuerzo)
+# ---------------------------------------------------------------------------
+
+def get_volleyball_headlines(url: str) -> list:
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        resp.raise_for_status()
+    except Exception as exc:
+        print(f"    [AVISO] No se pudo obtener {url}: {exc}")
+        return []
+
+    soup = BeautifulSoup(resp.text, "html.parser")
     headlines = []
-    seen_titles = set()
+    seen = set()
 
     for a_tag in soup.find_all("a", href=True):
         text = a_tag.get_text(strip=True)
         href = a_tag["href"]
 
-        if not text or len(text) < 15:
+        if not text or len(text) < 12:
             continue
-        if text in seen_titles:
+        if text in seen:
             continue
-
-        skip_words = ["Log In", "Sign Up", "Watch", "Listen",
-                       "Schedule", "Standings", "Scores", "Tickets"]
-        if any(word.lower() == text.lower() for word in skip_words):
-            continue
-
-        if href.startswith("/"):
-            href = base_url.rstrip("/") + href
         if not href.startswith("http"):
-            continue
+            if href.startswith("/"):
+                href = "https://espndeportes.espn.com" + href
+            else:
+                continue
 
-        seen_titles.add(text)
+        seen.add(text)
         headlines.append({"title": text, "link": href})
 
-    return headlines
-
-
-def classify_headline(title: str) -> str:
-    lower_title = title.lower()
-
-    for kw in INJURY_KEYWORDS:
-        if kw in lower_title:
-            return "Lesiones"
-
-    for kw in TRANSFER_KEYWORDS:
-        if kw in lower_title:
-            return "Transferencias"
-
-    return "Partidos / Noticias generales"
-
-
-# ---------------------------------------------------------------------------
-# PROCESAMIENTO
-# ---------------------------------------------------------------------------
-
-def get_sport_data(sport_name: str, leagues: dict) -> dict:
-    """
-    Descarga y combina la información de TODAS las ligas de un deporte.
-    Devuelve categorías combinadas y un listado de qué ligas fallaron.
-    """
-    categories = {
-        "Lesiones": [],
-        "Transferencias": [],
-        "Partidos / Noticias generales": [],
-    }
-    seen_global = set()  # evita repetir el mismo titular entre ligas
-    failed_leagues = []
-    successful_leagues = 0
-
-    for league_name, url in leagues.items():
-        soup = fetch_page(url)
-        if soup is None:
-            failed_leagues.append(league_name)
-            continue
-
-        successful_leagues += 1
-        base_url = get_base_url(url)
-        headlines = extract_headlines(soup, base_url)
-
-        for item in headlines:
-            if item["title"] in seen_global:
-                continue
-            seen_global.add(item["title"])
-
-            item["league"] = league_name
-            category = classify_headline(item["title"])
-            categories[category].append(item)
-
-    if successful_leagues == 0:
-        return {"error": True, "relevant": [], "categories": {}, "failed_leagues": failed_leagues}
-
-    # "Lo más relevante": lesiones primero, luego transferencias,
-    # completando con noticias generales si hace falta.
-    relevant = []
-    for cat in ["Lesiones", "Transferencias", "Partidos / Noticias generales"]:
-        for item in categories[cat]:
-            if len(relevant) >= TOP_N_RELEVANT:
-                break
-            relevant.append(item)
-        if len(relevant) >= TOP_N_RELEVANT:
-            break
-
-    return {
-        "error": False,
-        "relevant": relevant,
-        "categories": categories,
-        "failed_leagues": failed_leagues,
-    }
+    return headlines[:15]
 
 
 # ---------------------------------------------------------------------------
 # GENERACION DE HTML
 # ---------------------------------------------------------------------------
 
-HTML_HEAD = """<!DOCTYPE html>
+HTML_HEAD_TEMPLATE = """<!DOCTYPE html>
 <html lang="es">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Reporte Semanal de Deportes</title>
+<title>{site_name}</title>
 <style>
-    :root {
+    :root {{
         --bg: #0f1115;
         --card: #1a1d24;
         --accent: #ff5a36;
         --accent2: #36c2ff;
+        --accent3: #7cf29c;
         --text: #e8e8e8;
         --muted: #9aa0aa;
         --border: #2a2e37;
-    }
-    * { box-sizing: border-box; }
-    body {
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
         margin: 0;
         font-family: 'Segoe UI', Arial, sans-serif;
         background: var(--bg);
         color: var(--text);
         line-height: 1.5;
-    }
-    header {
+    }}
+    header {{
         background: linear-gradient(90deg, var(--accent), var(--accent2));
         padding: 30px 20px;
         text-align: center;
-    }
-    header h1 {
-        margin: 0;
-        font-size: 28px;
-        color: #fff;
-    }
-    header p {
-        margin: 6px 0 0;
-        color: rgba(255,255,255,0.9);
+        position: relative;
+    }}
+    .brand {{
         font-size: 14px;
-    }
-    .container {
-        max-width: 900px;
-        margin: 0 auto;
-        padding: 20px;
-    }
-    .summary {
+        font-weight: 700;
+        letter-spacing: 2px;
+        text-transform: uppercase;
+        color: rgba(255,255,255,0.85);
+        margin-bottom: 6px;
+    }}
+    header h1 {{ margin: 0; font-size: 28px; color: #fff; }}
+    header p {{ margin: 6px 0 0; color: rgba(255,255,255,0.9); font-size: 14px; }}
+    .container {{ max-width: 950px; margin: 0 auto; padding: 20px; }}
+
+    .summary {{
         background: var(--card);
         border: 1px solid var(--border);
         border-radius: 10px;
         padding: 20px;
         margin-bottom: 30px;
-    }
-    .summary h2 {
-        margin-top: 0;
-        color: var(--accent);
-        font-size: 20px;
-    }
-    .summary-item {
-        padding: 8px 0;
-        border-bottom: 1px solid var(--border);
-    }
-    .summary-item:last-child { border-bottom: none; }
-    .summary-item a {
-        color: var(--text);
-        text-decoration: none;
-        font-weight: 500;
-    }
-    .summary-item a:hover { color: var(--accent2); }
-    .tag {
+    }}
+    .summary h2 {{ margin-top: 0; color: var(--accent); font-size: 20px; }}
+    .summary-item {{ padding: 8px 0; border-bottom: 1px solid var(--border); }}
+    .summary-item:last-child {{ border-bottom: none; }}
+    .summary-item a {{ color: var(--text); text-decoration: none; font-weight: 500; }}
+    .summary-item a:hover {{ color: var(--accent2); }}
+
+    .tag {{
         display: inline-block;
         font-size: 11px;
         padding: 2px 8px;
@@ -295,62 +350,77 @@ HTML_HEAD = """<!DOCTYPE html>
         margin-right: 6px;
         font-weight: bold;
         text-transform: uppercase;
-    }
-    .tag-sport { background: var(--accent2); color: #00222e; }
-    .tag-cat { background: var(--accent); color: #2e0a00; }
-    .tag-league { background: #3a3f4b; color: var(--text); }
+        white-space: nowrap;
+    }}
+    .tag-sport {{ background: var(--accent2); color: #00222e; }}
+    .tag-cat {{ background: var(--accent); color: #2e0a00; }}
+    .tag-league {{ background: #3a3f4b; color: var(--text); }}
+    .tag-stat {{ background: var(--accent3); color: #003311; }}
 
-    .sport-section {
-        margin-bottom: 35px;
-    }
-    .sport-section h2 {
-        border-bottom: 2px solid var(--accent2);
-        padding-bottom: 8px;
-        font-size: 22px;
-    }
-    .failed-note {
-        font-size: 12px;
-        color: var(--muted);
-        margin: 4px 0 0;
-    }
-    .category-block {
-        margin-top: 18px;
-    }
-    .category-block h3 {
-        font-size: 16px;
+    .group-title {{
+        font-size: 26px;
+        margin: 40px 0 10px;
+        border-bottom: 3px solid var(--accent2);
+        padding-bottom: 6px;
+    }}
+    .league-section {{ margin-bottom: 30px; }}
+    .league-section h3 {{
+        font-size: 19px;
+        margin-bottom: 4px;
+        color: #fff;
+    }}
+    .failed-note {{ font-size: 12px; color: var(--muted); margin: 4px 0; }}
+
+    .category-block {{ margin-top: 14px; }}
+    .category-block h4 {{
+        font-size: 14px;
         color: var(--accent2);
-        margin-bottom: 8px;
-    }
-    ul.news-list {
-        list-style: none;
-        padding: 0;
-        margin: 0;
-    }
-    ul.news-list li {
+        margin-bottom: 6px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }}
+    ul.news-list {{ list-style: none; padding: 0; margin: 0; }}
+    ul.news-list li {{
         background: var(--card);
         border: 1px solid var(--border);
         border-radius: 8px;
         padding: 10px 14px;
         margin-bottom: 8px;
-    }
-    ul.news-list a {
-        color: var(--text);
-        text-decoration: none;
-    }
-    ul.news-list a:hover {
-        color: var(--accent2);
-        text-decoration: underline;
-    }
-    .empty-msg {
-        color: var(--muted);
-        font-style: italic;
-    }
-    footer {
+    }}
+    ul.news-list a {{ color: var(--text); text-decoration: none; font-weight: 500; }}
+    ul.news-list a:hover {{ color: var(--accent2); text-decoration: underline; }}
+    .news-desc {{ color: var(--muted); font-size: 13px; margin-top: 4px; }}
+
+    .leaders-table {{
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 14px;
+        margin-top: 6px;
+    }}
+    .leaders-table th, .leaders-table td {{
+        text-align: left;
+        padding: 6px 10px;
+        border-bottom: 1px solid var(--border);
+    }}
+    .leaders-table th {{ color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; }}
+
+    .empty-msg {{ color: var(--muted); font-style: italic; }}
+    footer {{
         text-align: center;
         color: var(--muted);
         font-size: 12px;
-        padding: 20px;
-    }
+        padding: 25px 20px;
+        border-top: 1px solid var(--border);
+        margin-top: 20px;
+    }}
+    footer .watermark {{
+        font-size: 13px;
+        color: var(--text);
+        font-weight: 700;
+        letter-spacing: 1px;
+        margin-bottom: 4px;
+    }}
+    footer .watermark span {{ color: var(--accent2); }}
 </style>
 </head>
 <body>
@@ -362,14 +432,70 @@ HTML_FOOT = """
 """
 
 
-def build_html(data_by_sport: dict) -> str:
+def render_news_categories(categories: dict) -> list:
+    parts = []
+    order = ["Lesiones", "Transferencias", "Análisis y Opiniones", "General"]
+    any_news = False
+
+    for cat_name in order:
+        items = categories.get(cat_name, [])
+        if not items:
+            continue
+        any_news = True
+        parts.append(f'<div class="category-block"><h4>{cat_name}</h4>')
+        parts.append('<ul class="news-list">')
+        for item in items[:MAX_NEWS_PER_CATEGORY]:
+            desc_html = f'<div class="news-desc">{item["description"]}</div>' if item.get("description") else ""
+            parts.append(
+                f'<li><a href="{item["link"]}" target="_blank">{item["title"]}</a>{desc_html}</li>'
+            )
+        parts.append("</ul></div>")
+
+    if not any_news:
+        parts.append('<p class="empty-msg">No se encontraron noticias recientes para esta liga.</p>')
+
+    return parts
+
+
+def render_leaders(leaders: list) -> list:
+    parts = []
+    if not leaders:
+        return parts
+
+    # Limitar y deduplicar por (categoria, jugador)
+    seen = set()
+    rows = []
+    for l in leaders:
+        key = (l["category"], l["athlete"])
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(l)
+        if len(rows) >= MAX_LEADERS:
+            break
+
+    if not rows:
+        return parts
+
+    parts.append('<div class="category-block"><h4>📊 Jugadores destacados (últimos partidos)</h4>')
+    parts.append('<table class="leaders-table"><tr><th>Partido</th><th>Categoría</th><th>Jugador</th><th>Valor</th></tr>')
+    for r in rows:
+        parts.append(
+            f'<tr><td>{r["matchup"]}</td><td>{r["category"]}</td>'
+            f'<td>{r["athlete"]}</td><td><span class="tag tag-stat">{r["value"]}</span></td></tr>'
+        )
+    parts.append("</table></div>")
+    return parts
+
+
+def build_html(news_data: dict, leaders_data: dict, volleyball_data: dict) -> str:
     today = datetime.date.today()
     week_start = today - datetime.timedelta(days=7)
 
-    parts = [HTML_HEAD]
-
+    parts = [HTML_HEAD_TEMPLATE.format(site_name=SITE_NAME)]
     parts.append(f"""
 <header>
+    <div class="brand">{SITE_NAME}</div>
     <h1>📰 Reporte Semanal de Deportes</h1>
     <p>Del {week_start.strftime('%d/%m/%Y')} al {today.strftime('%d/%m/%Y')}</p>
 </header>
@@ -379,17 +505,18 @@ def build_html(data_by_sport: dict) -> str:
     # --- Resumen / Lo más relevante ---
     parts.append('<div class="summary"><h2>⭐ Lo más relevante de la semana</h2>')
     any_relevant = False
-    for sport_name, data in data_by_sport.items():
-        if data.get("error") or not data.get("relevant"):
-            continue
-        for item in data["relevant"]:
-            any_relevant = True
-            cat = classify_headline(item["title"])
-            parts.append(f"""
+    for group_name, leagues in SPORTS.items():
+        for league_name, sport_path, league_path in leagues:
+            data = news_data.get((group_name, league_name), {})
+            categories = data.get("categories", {})
+            for cat_name in ["Lesiones", "Transferencias", "Análisis y Opiniones"]:
+                for item in categories.get(cat_name, [])[:2]:
+                    any_relevant = True
+                    parts.append(f"""
 <div class="summary-item">
-    <span class="tag tag-sport">{sport_name}</span>
-    <span class="tag tag-league">{item['league']}</span>
-    <span class="tag tag-cat">{cat}</span>
+    <span class="tag tag-sport">{group_name}</span>
+    <span class="tag tag-league">{league_name}</span>
+    <span class="tag tag-cat">{cat_name}</span>
     <a href="{item['link']}" target="_blank">{item['title']}</a>
 </div>
 """)
@@ -397,44 +524,52 @@ def build_html(data_by_sport: dict) -> str:
         parts.append('<p class="empty-msg">No se encontraron noticias destacadas esta semana.</p>')
     parts.append("</div>")
 
-    # --- Secciones completas por deporte ---
-    for sport_name, data in data_by_sport.items():
-        parts.append(f'<div class="sport-section"><h2>{sport_name}</h2>')
+    # --- Secciones por grupo de deporte ---
+    for group_name, leagues in SPORTS.items():
+        parts.append(f'<h2 class="group-title">{group_name}</h2>')
 
-        if data.get("error"):
-            parts.append('<p class="empty-msg">⚠️ No se pudo obtener información de ninguna liga de este deporte.</p>')
-            parts.append("</div>")
-            continue
+        for league_name, sport_path, league_path in leagues:
+            data = news_data.get((group_name, league_name), {})
+            leaders = leaders_data.get((group_name, league_name), [])
 
-        failed = data.get("failed_leagues") or []
-        if failed:
-            parts.append(f'<p class="failed-note">⚠️ No se pudo obtener: {", ".join(failed)}</p>')
+            parts.append(f'<div class="league-section"><h3>{league_name}</h3>')
 
-        categories = data["categories"]
-        for cat_name, items in categories.items():
-            parts.append(f'<div class="category-block"><h3>{cat_name}</h3>')
-            if not items:
-                parts.append('<p class="empty-msg">No se encontraron noticias en esta categoría.</p>')
-            else:
-                parts.append('<ul class="news-list">')
-                for item in items[:MAX_PER_CATEGORY]:
-                    parts.append(
-                        f'<li><span class="tag tag-league">{item["league"]}</span> '
-                        f'<a href="{item["link"]}" target="_blank">{item["title"]}</a></li>'
-                    )
-                parts.append("</ul>")
+            if data.get("error"):
+                parts.append('<p class="failed-note">⚠️ No se pudo obtener información de esta liga.</p>')
+                parts.append("</div>")
+                continue
+
+            parts.extend(render_leaders(leaders))
+            parts.extend(render_news_categories(data.get("categories", {})))
+
             parts.append("</div>")
 
+    # --- Voleibol ---
+    parts.append('<h2 class="group-title">Voleibol 🏐</h2>')
+    for source_name, items in volleyball_data.items():
+        parts.append(f'<div class="league-section"><h3>{source_name}</h3>')
+        if not items:
+            parts.append(
+                '<p class="failed-note">⚠️ No se encontraron noticias automáticamente. '
+                'ESPN suele mostrar el voleibol con contenido cargado por JavaScript, '
+                'así que esta sección puede salir vacía. '
+                'Si necesitas la VNL específicamente, dímelo y agrego la fuente '
+                'oficial de la FIVB como fuente alternativa.</p>'
+            )
+        else:
+            parts.append('<ul class="news-list">')
+            for item in items[:10]:
+                parts.append(f'<li><a href="{item["link"]}" target="_blank">{item["title"]}</a></li>')
+            parts.append("</ul>")
         parts.append("</div>")
 
-    parts.append("</div>")
-
+    parts.append("</div>")  # cierre container
     parts.append(f"""
 <footer>
+    <div class="watermark">{SITE_NAME} <span>•</span> by {SITE_AUTHOR}</div>
     Generado automáticamente el {today.strftime('%d/%m/%Y a las %H:%M')}.
 </footer>
 """)
-
     parts.append(HTML_FOOT)
     return "\n".join(parts)
 
@@ -444,16 +579,27 @@ def build_html(data_by_sport: dict) -> str:
 # ---------------------------------------------------------------------------
 
 def main():
-    print("Generando reporte semanal de deportes...")
+    print("Generando reporte semanal de deportes...\n")
 
-    data_by_sport = {}
-    for sport_name, leagues in SOURCES.items():
-        print(f"- {sport_name}:")
-        for league_name in leagues:
-            print(f"    - Descargando: {league_name} ...")
-        data_by_sport[sport_name] = get_sport_data(sport_name, leagues)
+    news_data = {}
+    leaders_data = {}
 
-    html_content = build_html(data_by_sport)
+    for group_name, leagues in SPORTS.items():
+        print(f"== {group_name} ==")
+        for league_name, sport_path, league_path in leagues:
+            print(f"  - {league_name}: descargando noticias...")
+            news_data[(group_name, league_name)] = get_news(sport_path, league_path)
+
+            print(f"  - {league_name}: descargando líderes/estadísticas...")
+            leaders_data[(group_name, league_name)] = get_leaders(sport_path, league_path)
+
+    print("\n== Voleibol ==")
+    volleyball_data = {}
+    for source_name, url in VOLLEYBALL_SOURCES.items():
+        print(f"  - {source_name}: descargando...")
+        volleyball_data[source_name] = get_volleyball_headlines(url)
+
+    html_content = build_html(news_data, leaders_data, volleyball_data)
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     filepath = os.path.join(OUTPUT_DIR, HTML_FILENAME)
@@ -469,28 +615,30 @@ if __name__ == "__main__":
 
 
 # ---------------------------------------------------------------------------
-# COMO AUTOMATIZARLO CADA SEMANA EN WINDOWS
+# COMO PUBLICARLO EN INTERNET (GitHub Pages + GitHub Actions)
 # ---------------------------------------------------------------------------
 #
-# 1. Abre el "Programador de tareas" (Task Scheduler) desde el menú Inicio.
-# 2. Click en "Crear tarea básica..."
-# 3. Nombre: "Reporte Semanal Deportes"
-# 4. Desencadenador: Semanalmente -> elige el día (ej. lunes) y la hora (ej. 8:00 AM)
-# 5. Acción: "Iniciar un programa"
-#    - Programa/script: ruta a python.exe (se obtiene con "where python" en cmd)
-#    - Agregar argumentos: weekly_sports_report.py
-#    - Iniciar en: la carpeta donde guardaste el script (ej. C:\\SportsReport)
-# 6. Finalizar.
+# Este script genera "reports/index.html". Si lo subes a un repositorio de
+# GitHub y activas GitHub Pages apuntando a la carpeta "reports", obtienes
+# un link público como:
 #
-# Cada semana se generará/actualizará el archivo:
-#    reports\\reporte_deportes.html
+#     https://TU_USUARIO.github.io/marcador-semanal/
 #
-# Como el nombre del archivo es siempre el mismo, puedes dejarlo abierto
-# como una pestaña fija en tu navegador y solo presionar F5 cada lunes
-# para ver la versión más reciente.
+# Y con GitHub Actions, este script se ejecuta SOLO, automáticamente,
+# cada semana, sin que tu PC necesite estar prendido.
+#
+# Sigue la guía completa que te dio Claude paso a paso (creación del
+# repositorio, archivo de workflow .github/workflows/weekly.yml, y
+# activación de GitHub Pages).
+# ---------------------------------------------------------------------------
+#
+# AUTOMATIZACION LOCAL (alternativa con Windows Task Scheduler):
+#   Ver instrucciones en conversaciones anteriores. La versión de
+#   GitHub Actions es preferible porque no depende de que tu PC
+#   esté encendido.
 #
 # AGREGAR/QUITAR LIGAS:
-#   Edita el diccionario SOURCES al inicio del archivo. Cada deporte tiene
-#   un sub-diccionario {nombre_liga: url}. Puedes agregar nuevas URLs de
-#   ligas de ESPN siguiendo el mismo formato.
+#   Edita el diccionario SPORTS al inicio del archivo. Cada entrada es
+#   (nombre_a_mostrar, sport_path, league_path) según la nomenclatura
+#   de ESPN (ej. soccer/eng.1, basketball/nba, football/nfl).
 # ---------------------------------------------------------------------------
