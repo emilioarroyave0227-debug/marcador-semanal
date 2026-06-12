@@ -317,6 +317,17 @@ HTML_HEAD_TEMPLATE = """<!DOCTYPE html>
         text-align: center;
         position: relative;
     }}
+    .brand-row {{
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+        margin-bottom: 6px;
+    }}
+    .brand-row img {{
+        height: 32px;
+        width: auto;
+    }}
     .brand {{
         font-size: 14px;
         font-weight: 700;
@@ -495,7 +506,10 @@ def build_html(news_data: dict, leaders_data: dict, volleyball_data: dict) -> st
     parts = [HTML_HEAD_TEMPLATE.format(site_name=SITE_NAME)]
     parts.append(f"""
 <header>
-    <div class="brand">{SITE_NAME}</div>
+    <div class="brand-row">
+        <img src="logo.png" alt="{SITE_NAME} logo" onerror="this.style.display='none'">
+        <span class="brand">{SITE_NAME}</span>
+    </div>
     <h1>📰 Reporte Semanal de Deportes</h1>
     <p>Del {week_start.strftime('%d/%m/%Y')} al {today.strftime('%d/%m/%Y')}</p>
 </header>
