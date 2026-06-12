@@ -1,4 +1,4 @@
-\"""
+"""
 Reporte Semanal de Deportes (HTML) - v4
 =========================================
 
